@@ -1,0 +1,18 @@
+[package]
+name = "bdnsql"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-web = "4.0"           # Web framework
+actix-service = "2.0"       # Web framework   
+mongodb = "3.1"             # MongoDB driver
+serde = { version = "1.0", features = ["derive"] }  # Serialization and deserialization
+serde_json = "1.0"          # JSON support
+futures = "0.3"             # Asynchronous programming
+dotenv = "0.15"             # Environment variables
+tokio = { version = "1", features = ["full"] } 
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1.0"
