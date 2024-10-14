@@ -1,4 +1,5 @@
 use mongodb::{options::ClientOptions, Client};
+use routes::{classy_config, comment_config, courses_config, unit_config, user_config};
 use std::env;
 use dotenv::dotenv;
 
@@ -9,6 +10,7 @@ mod unit;
 mod class;
 mod users;
 mod comment;
+mod routes;
 
 #[tokio::main]
 async fn main() -> mongodb::error::Result<()> {
@@ -22,6 +24,11 @@ async fn main() -> mongodb::error::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(client.clone()))
+            .configure(user_config)
+            .configure(unit_config) 
+            .configure(courses_config)
+            .configure(comment_config)
+            .configure(classy_config)
     })
     .bind("127.0.0.1:8080")?
     .run()

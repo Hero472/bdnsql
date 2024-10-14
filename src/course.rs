@@ -5,7 +5,7 @@ use mongodb::bson::oid::ObjectId;
 use actix_web::{web, HttpResponse, Responder};
 use mongodb::{Client, Database, Collection, bson::doc};
 
-use crate::{comment::Comment, unit::Unit};
+use crate::comment::{Comment, CommentSend};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Course {
@@ -17,11 +17,18 @@ pub struct Course {
     #[serde(skip_serializing_if = "Option::is_none")]
     rating: Option<f32>,
     image: String,
-    units: Vec<Unit>,
+    pub units: Vec<ObjectId>,
     inscribed: u64
 }
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CourseReceive {
+    name: String,
+    description: String,
+    rating: Option<f32>,
+    image: String
+}
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CourseSummary {
     name: String,
     description: String,
@@ -29,17 +36,32 @@ pub struct CourseSummary {
     rating: Option<f32>,
 }
 
-pub async fn create_course(client: web::Data<Client>, new_course: web::Json<Course>) -> impl Responder {
-    let db: Database = client.database("test");
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CourseWithComments {
+    course: Course,
+    comments: Vec<CommentSend>,
+}
+
+pub async fn create_course(client: web::Data<Client>, new_course: web::Json<CourseReceive>) -> impl Responder {
+    let db: Database = client.database("local");
     let collection: Collection<Course> = db.collection("courses");
     
-    let new_course_data: Course = new_course.into_inner();
-    if let Some(rating) = new_course_data.rating {
+    if let Some(rating) = new_course.rating {
         if rating < 1.0 || rating > 5.0 {
             return HttpResponse::BadRequest().body("Rating must be between 1 and 5.");
         }
     }
 
+    let new_course_data: Course = Course {
+        id: None,
+        name: new_course.name.clone(),
+        description: new_course.description.clone(),
+        rating: new_course.rating.clone(),
+        image: new_course.image.clone(),
+        units: Vec::new(),
+        inscribed: 0,
+    };
+    println!("{new_course_data:?} Inserted Succesfully");
     match collection.insert_one(new_course_data).await {
         Ok(insert_result) => HttpResponse::Ok().json(insert_result.inserted_id),
         Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
@@ -47,7 +69,7 @@ pub async fn create_course(client: web::Data<Client>, new_course: web::Json<Cour
 }
 
 pub async fn get_available_courses(client: web::Data<Client>) -> impl Responder {
-    let db: Database = client.database("test");
+    let db: Database = client.database("local");
     let collection: Collection<Course> = db.collection("courses");
     
     let mut cursor: mongodb::Cursor<Course> = match collection.find(doc! {}).await {
@@ -71,11 +93,12 @@ pub async fn get_available_courses(client: web::Data<Client>) -> impl Responder 
             Err(e) => eprintln!("Error processing document: {:?}", e),
         };
     }
+    println!("{courses:?}");
     HttpResponse::Ok().json(courses)
 }
 
 pub async fn get_course(client: web::Data<Client>, course_id: web::Path<String>) -> impl Responder {
-    let db: Database = client.database("test");
+    let db: Database = client.database("local");
     let collection_courses: Collection<Course> = db.collection("courses");
     let collections_comments: Collection<Comment> = db.collection("comments");
 
@@ -87,23 +110,40 @@ pub async fn get_course(client: web::Data<Client>, course_id: web::Path<String>)
     match collection_courses.find_one(doc! { "_id": course_id }).await {
         Ok(Some(course)) => {
             let mut cursor: mongodb::Cursor<Comment> = match collections_comments.find(doc! {
-                "reference_id": course_id,
-                "reference_type": "course"
+                "_reference_id": course_id,
+                "reference_type": "Course",
             }).sort(doc! {"likes": -1}).limit(3).await {
                 Ok(cursor) => cursor,
                 Err(e) => return HttpResponse::InternalServerError().body(format!("Error retrieving comments: {}", e)),
             };
+            
+            
 
-            let mut comments: Vec<Comment> = Vec::new();
-
+            let mut comments: Vec<CommentSend> = Vec::new();
             while let Some(comment) = cursor.next().await {
                 match comment {
-                    Ok(doc) => comments.push(doc),
-                    Err(_) => return HttpResponse::InternalServerError().body("Error retrieving comments.")
+                    Ok(doc) => {
+                        let comment_send: CommentSend = CommentSend {
+                            author: doc.author().clone(),
+                            date: doc.date(),
+                            title: doc.title().clone(),
+                            detail: doc.detail().clone(),
+                            likes: doc.likes(),
+                            dislikes: doc.dislikes(),
+                        };
+                        comments.push(comment_send);
+                    },
+                    Err(_) => return HttpResponse::InternalServerError().body("Error retrieving comments."),
                 }
             }
+            println!("{comments:?}");
+            let response: CourseWithComments = CourseWithComments {
+                course,
+                comments,
+            };
 
-            HttpResponse::Ok().json(comments)
+            println!("{:?}", response);
+            HttpResponse::Ok().json(response)
 
         },
         Ok(None) => HttpResponse::NotFound().body("Course not found."),
@@ -111,8 +151,8 @@ pub async fn get_course(client: web::Data<Client>, course_id: web::Path<String>)
     }
 }
 
-pub async fn get_comments(client: web::Data<Client>, course_id: web::Path<String>) -> impl Responder {
-    let db: Database = client.database("test");
+pub async fn get_comments_course(client: web::Data<Client>, course_id: web::Path<String>) -> impl Responder {
+    let db: Database = client.database("local");
     let collection: Collection<Comment> = db.collection("comments");
 
     let course_id: ObjectId = match ObjectId::parse_str(&course_id.into_inner()) {
@@ -121,19 +161,28 @@ pub async fn get_comments(client: web::Data<Client>, course_id: web::Path<String
     };
 
     let mut cursor: mongodb::Cursor<Comment> = match collection.find(doc! {
-        "reference_id": course_id,
-        "reference_type": "course"
-    }).await {
+        "_reference_id": course_id,
+        "reference_type": "Course"
+    }).sort(doc! {"likes": -1}).await {
         Ok(cursor) => cursor,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Error: {}", e)),
     };
 
-    let mut comments: Vec<Comment> = Vec::new();
-
+    let mut comments: Vec<CommentSend> = Vec::new();
     while let Some(comment) = cursor.next().await {
         match comment {
-            Ok(doc) => comments.push(doc),
-            Err(_) => return HttpResponse::InternalServerError().body("Error retrieving comments.")
+            Ok(doc) => {
+                let comment_send: CommentSend = CommentSend {
+                    author: doc.author().clone(),
+                    date: doc.date(),
+                    title: doc.title().clone(),
+                    detail: doc.detail().clone(),
+                    likes: doc.likes(),
+                    dislikes: doc.dislikes(),
+                };
+                comments.push(comment_send);
+            },
+            Err(_) => return HttpResponse::InternalServerError().body("Error retrieving comments."),
         }
     }
 
