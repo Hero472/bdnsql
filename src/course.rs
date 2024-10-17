@@ -5,7 +5,7 @@ use mongodb::bson::oid::ObjectId;
 use actix_web::{web, HttpResponse, Responder};
 use mongodb::{Client, Database, Collection, bson::doc};
 
-use crate::comment::{Comment, CommentSend};
+use crate::{class::Classy, comment::{Comment, CommentSend}, unit::{Unit, UnitFullCourse}};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Course {
@@ -17,6 +17,7 @@ pub struct Course {
     #[serde(skip_serializing_if = "Option::is_none")]
     rating: Option<f32>,
     image: String,
+    image_banner: String,
     pub units: Vec<ObjectId>,
     inscribed: u64
 }
@@ -25,14 +26,24 @@ pub struct CourseReceive {
     name: String,
     description: String,
     rating: Option<f32>,
-    image: String
+    image: String,
+    image_banner: String
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FullCourse {
+    name: String,
+    description: String,
+    image: String,
+    image_banner: String,
+    units: Vec<UnitFullCourse>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CourseSummary {
     name: String,
     description: String,
-    image: String,
+    image_banner: String,
     rating: Option<f32>,
 }
 
@@ -58,13 +69,74 @@ pub async fn create_course(client: web::Data<Client>, new_course: web::Json<Cour
         description: new_course.description.clone(),
         rating: new_course.rating.clone(),
         image: new_course.image.clone(),
+        image_banner: new_course.image_banner.clone(),
         units: Vec::new(),
         inscribed: 0,
     };
-    println!("{new_course_data:?} Inserted Succesfully");
+
     match collection.insert_one(new_course_data).await {
         Ok(insert_result) => HttpResponse::Ok().json(insert_result.inserted_id),
         Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    }
+}
+
+pub async fn create_complete_course(client: web::Data<Client>, full_course: web::Json<FullCourse>) -> impl Responder {
+    let db: Database = client.database("local");
+    let collection_course: Collection<Course> = db.collection("courses");
+    let collection_unit: Collection<Unit> = db.collection("units");
+    let collection_classy: Collection<Classy> = db.collection("classes");
+
+    // Create a new course data structure
+    let new_course_data: Course = Course {
+        id: None,
+        name: full_course.name.clone(),
+        description: full_course.description.clone(),
+        image: full_course.image.clone(),
+        image_banner: full_course.image_banner.clone(),
+        rating: None,
+        units: Vec::new(),
+        inscribed: 0,
+    };
+
+    // Insert the new course
+    match collection_course.insert_one(new_course_data).await {
+        Ok(insert_result) => {
+            let course_id: ObjectId = insert_result.inserted_id.as_object_id().unwrap();
+
+            for unit_receive in &full_course.units {
+                let new_unit: Unit = Unit {
+                    id: None,
+                    course_id: Some(course_id),
+                    name: unit_receive.name.clone(),
+                    order: unit_receive.order,
+                };
+
+                let unit_id = match collection_unit.insert_one(new_unit).await {
+                    Ok(insert_result) => insert_result.inserted_id.as_object_id().unwrap(),
+                    Err(error) => return HttpResponse::InternalServerError().body(format!("Error inserting unit: {}", error)),
+                };
+
+                for classy_receive in &unit_receive.classes {
+                    let new_class: Classy = Classy {
+                        id: None,
+                        unit_id: Some(unit_id),  // Use the unit_id directly here
+                        name: classy_receive.name.clone(),
+                        description: classy_receive.description.clone(),
+                        order: classy_receive.order,
+                        video: classy_receive.video.clone(),
+                        tutor: classy_receive.tutor.clone(),
+                        support_material: classy_receive.support_material.clone(),
+                    };
+
+                    if let Err(error) = collection_classy.insert_one(new_class).await {
+                        return HttpResponse::InternalServerError().body(format!("Error inserting class: {}", error));
+                    }
+                }
+            }
+
+            HttpResponse::Created().body("Course created successfully")
+        },
+        Err(error) => HttpResponse::InternalServerError().body(format!("Error inserting course: {}", error)),
     }
 }
 
@@ -85,7 +157,7 @@ pub async fn get_available_courses(client: web::Data<Client>) -> impl Responder 
                 let summary: CourseSummary = CourseSummary {
                     name: course_doc.name.clone(),
                     description: course_doc.description.clone(),
-                    image: course_doc.image.clone(),
+                    image_banner: course_doc.image_banner.clone(),
                     rating: course_doc.rating,
                 };
                 courses.push(summary);
@@ -93,7 +165,6 @@ pub async fn get_available_courses(client: web::Data<Client>) -> impl Responder 
             Err(e) => eprintln!("Error processing document: {:?}", e),
         };
     }
-    println!("{courses:?}");
     HttpResponse::Ok().json(courses)
 }
 
@@ -136,13 +207,12 @@ pub async fn get_course(client: web::Data<Client>, course_id: web::Path<String>)
                     Err(_) => return HttpResponse::InternalServerError().body("Error retrieving comments."),
                 }
             }
-            println!("{comments:?}");
+
             let response: CourseWithComments = CourseWithComments {
                 course,
                 comments,
             };
 
-            println!("{:?}", response);
             HttpResponse::Ok().json(response)
 
         },

@@ -3,22 +3,28 @@ use futures::StreamExt;
 use mongodb::{bson::{doc, oid::ObjectId}, Collection};
 use serde::{Deserialize, Serialize};
 
-use crate::course::Course;
+use crate::{class::ClassyReceive, course::Course};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Unit {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
-    id: Option<ObjectId>,
+    pub(crate) id: Option<ObjectId>,
     #[serde(rename = "_course_id", skip_serializing_if = "Option::is_none")]
-    course_id: Option<ObjectId>,
-    name: String,
-    order: usize
+    pub(crate) course_id: Option<ObjectId>,
+    pub(crate) name: String,
+    pub(crate) order: usize
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UnitReceive {
-    course_id: Option<ObjectId>,
-    name: String,
-    order: usize
+    pub(crate) course_id: Option<ObjectId>,
+    pub(crate) name: String,
+    pub(crate) order: usize
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnitFullCourse {
+    pub(crate) name: String,
+    pub(crate) order: usize,
+    pub(crate) classes: Vec<ClassyReceive> 
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UnitSend {

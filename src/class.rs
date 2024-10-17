@@ -8,26 +8,27 @@ use crate::comment::{Comment, CommentSend};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Classy {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
-    id: Option<ObjectId>,
+    pub(crate) id: Option<ObjectId>,
     #[serde(rename = "_unit_id", skip_serializing_if = "Option::is_none")]
-    unit_id: Option<ObjectId>,
-    name: String,
-    description: String,
-    order: usize,
-    video: String,
-    tutor: String,
-    support_material: Vec<String>
+    pub(crate) unit_id: Option<ObjectId>,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) order: usize,
+    pub(crate) video: String,
+    pub(crate) tutor: String,
+    pub(crate) support_material: Vec<String>
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClassyReceive {
-    unit_id: Option<ObjectId>,
-    name: String,
-    description: String,
-    order: usize,
-    video: String,
-    tutor: String,
-    support_material: Vec<String>
+    pub(crate) unit_id: Option<ObjectId>,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) order: usize,
+    pub(crate) video: String,
+    pub(crate) tutor: String,
+    pub(crate) support_material: Vec<String>
 }
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClassySend {
     name: String,

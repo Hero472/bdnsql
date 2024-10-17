@@ -1,5 +1,5 @@
 use mongodb::{options::ClientOptions, Client};
-use routes::{classy_config, comment_config, courses_config, unit_config, user_config};
+use routes::{classy_config, comment_config, courses_config, unit_config};
 use std::env;
 use dotenv::dotenv;
 
@@ -8,7 +8,6 @@ use actix_web::{web, App, HttpServer};
 mod course;
 mod unit;
 mod class;
-mod users;
 mod comment;
 mod routes;
 
@@ -24,7 +23,6 @@ async fn main() -> mongodb::error::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(client.clone()))
-            .configure(user_config)
             .configure(unit_config) 
             .configure(courses_config)
             .configure(comment_config)
