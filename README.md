@@ -117,6 +117,35 @@ A continuación se presentan las rutas disponibles en la API:
   }
   ```
 
+- **POST** `/courses` - Crea un nuevo curso completo.
+
+  #### Cuerpo de la solicitud (Request Body):
+  La solicitud debe enviar un JSON con los siguientes campos:
+
+  ```json
+  {
+    "name": "string",                      // El nombre del curso.
+    "description": "string",               // La descripción del curso.
+    "image": "string",                     // URL de la imagen del curso.
+    "image_banner": "string",               // URL del banner del curso.
+    "units": [                             // Lista de unidades del curso.
+      {
+        "name": "string",                  // El nombre de la unidad.
+        "order": 0,                        // El orden de la unidad.
+        "classes": [                       // Lista de clases dentro de la unidad.
+          {
+            "name": "string",              // El nombre de la clase.
+            "description": "string",       // La descripción de la clase.
+            "video": "string",              // URL del video de la clase.
+            "tutor": "string",              // Nombre del tutor de la clase.
+            "order": 0,                    // El orden de la clase.
+            "support_material": ["string"]  // Lista de materiales de soporte.
+          }
+        ]
+      }
+    ]
+  }
+
 - **GET** `/courses` - Obtiene la lista de cursos disponibles.
 
   #### Respuesta (Response Body):
