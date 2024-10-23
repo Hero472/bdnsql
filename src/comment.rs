@@ -93,7 +93,6 @@ pub async fn create_comment(client: web::Data<mongodb::Client>, new_comment: web
         reference_id: new_comment.reference_id.clone(),
         reference_type: new_comment.reference_type.clone(),
     };
-    println!("{new_comment_data:?} Inserted Succesfully");
     match collection.insert_one(new_comment_data).await {
         Ok(insert_result) => HttpResponse::Ok().json(insert_result.inserted_id),
         Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e))

@@ -32,11 +32,11 @@ pub struct CourseReceive {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FullCourse {
-    name: String,
-    description: String,
-    image: String,
-    image_banner: String,
-    units: Vec<UnitFullCourse>,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) image: String,
+    pub(crate) image_banner: String,
+    pub(crate) units: Vec<UnitFullCourse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,7 +86,6 @@ pub async fn create_complete_course(client: web::Data<Client>, full_course: web:
     let collection_unit: Collection<Unit> = db.collection("units");
     let collection_classy: Collection<Classy> = db.collection("classes");
 
-    // Create a new course data structure
     let new_course_data: Course = Course {
         id: None,
         name: full_course.name.clone(),
@@ -98,9 +97,9 @@ pub async fn create_complete_course(client: web::Data<Client>, full_course: web:
         inscribed: 0,
     };
 
-    // Insert the new course
     match collection_course.insert_one(new_course_data).await {
         Ok(insert_result) => {
+            
             let course_id: ObjectId = insert_result.inserted_id.as_object_id().unwrap();
 
             for unit_receive in &full_course.units {
@@ -111,15 +110,20 @@ pub async fn create_complete_course(client: web::Data<Client>, full_course: web:
                     order: unit_receive.order,
                 };
 
-                let unit_id = match collection_unit.insert_one(new_unit).await {
+                let unit_id: ObjectId = match collection_unit.insert_one(new_unit).await {
                     Ok(insert_result) => insert_result.inserted_id.as_object_id().unwrap(),
                     Err(error) => return HttpResponse::InternalServerError().body(format!("Error inserting unit: {}", error)),
+                };
+
+                let _ = match collection_course.update_one(doc! { "_id": course_id }, doc! {"$push": { "units": unit_id }}).await {
+                    Ok(_) => {},
+                    Err(error) => return HttpResponse::InternalServerError().body(format!("Error inserting updating course unit array: {}", error)),
                 };
 
                 for classy_receive in &unit_receive.classes {
                     let new_class: Classy = Classy {
                         id: None,
-                        unit_id: Some(unit_id),  // Use the unit_id directly here
+                        unit_id: Some(unit_id),
                         name: classy_receive.name.clone(),
                         description: classy_receive.description.clone(),
                         order: classy_receive.order,
