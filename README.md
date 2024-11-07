@@ -56,6 +56,12 @@ Una vez que las dependencias estén instaladas, puedes ejecutar el proyecto con:
 cargo run
 ```
 
+Para poblar la base de datos, puedes usar el siguiente comando:
+
+```bash
+cargo run -- --populate
+```
+
 ### Verificar la Conexión
 
 Si todo ha sido configurado correctamente, deberías ver un mensaje en la consola confirmando la conexión exitosa a MongoDB:
