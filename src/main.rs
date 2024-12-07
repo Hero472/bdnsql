@@ -2,10 +2,14 @@ use clap::{command, Parser};
 use class::ClassyReceive;
 use course::{create_complete_course, FullCourse};
 use mongodb::{options::ClientOptions, Client};
-use routes::{classy_config, comment_config, courses_config, unit_config};
+use routes::{classy_config, comment_config, courses_config, unit_config, user_config};
 use unit::UnitFullCourse;
 use std::env;
 use dotenv::dotenv;
+
+use rusoto_core::{Region, HttpClient};
+use rusoto_credential::StaticProvider;
+use rusoto_dynamodb::DynamoDbClient;
 
 use actix_web::{web, App, HttpServer};
 
@@ -14,6 +18,7 @@ mod unit;
 mod class;
 mod comment;
 mod routes;
+mod user;
 
 #[derive(Parser, Debug)]
 #[command(name = "My App", version, about = "An app that connects to MongoDB")]
@@ -28,47 +33,56 @@ async fn main() -> mongodb::error::Result<()> {
     
     let cli: Cli = Cli::parse();
 
-    let db_uri: String = env::var("MONGODB_URI").expect("Expected MONGODB_URI in env");
-    let client_options: ClientOptions = ClientOptions::parse(db_uri).await?;
-    let client: Client = Client::with_options(client_options)?;
-    println!();
-    println!("Connected to MongoDB!");
-    println!();
+    let client_mongo: Client = initialize_mongo().await?;
+    let client_dynamo: DynamoDbClient = initialize_dynamo().unwrap();
 
     if cli.populate {
-        // If --populate flag is passed, populate the database
         println!("Populating the database...");
-        populate_database(web::Data::new(client.clone())).await?;
-
-        println!("Running server");
-        HttpServer::new(move || {
-            App::new()
-                .app_data(web::Data::new(client.clone()))
-                .configure(unit_config) 
-                .configure(courses_config)
-                .configure(comment_config)
-                .configure(classy_config)
-        })
-        .bind("127.0.0.1:8080")?
-        .run()
-        .await?;
-    } else {
-        // Otherwise, run the HTTP server
-        println!("Running server");
-        HttpServer::new(move || {
-            App::new()
-                .app_data(web::Data::new(client.clone()))
-                .configure(unit_config) 
-                .configure(courses_config)
-                .configure(comment_config)
-                .configure(classy_config)
-        })
-        .bind("127.0.0.1:8080")?
-        .run()
-        .await?;
+        populate_database(web::Data::new(client_mongo.clone())).await?;
     }
-    
+
+    println!("Running server on http://127.0.0.1:8080");
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(client_mongo.clone()))
+            .app_data(web::Data::new(client_dynamo.clone()))
+            .configure(unit_config) 
+            .configure(courses_config)
+            .configure(comment_config)
+            .configure(classy_config)
+            .configure(user_config)
+
+    })
+    .bind("127.0.0.1:8080")?
+    .run()
+    .await?;
+
     Ok(())
+}
+
+async fn initialize_mongo() -> mongodb::error::Result<Client> {
+    let db_uri = env::var("MONGODB_URI").expect("Expected MONGODB_URI in env");
+    let client_options = ClientOptions::parse(&db_uri).await?;
+    let client = Client::with_options(client_options)?;
+    println!("Connected to MongoDB!");
+    Ok(client)
+}
+
+fn initialize_dynamo() -> Result<DynamoDbClient, Box<dyn std::error::Error>> {
+    let dynamodb_uri: String = env::var("DYNAMODB_URI").expect("Expected DYNAMODB_URI in env");
+    let access_key = env::var("ACCESS_KEY").expect("Expected ACCESS_KEY in env");
+    let secret_key = env::var("SECRET_KEY").expect("Expected SECRET_KEY in env");
+    let provider: StaticProvider = StaticProvider::new_minimal(access_key, secret_key);
+    let client: DynamoDbClient = DynamoDbClient::new_with(
+        HttpClient::new().unwrap(),
+        provider,
+        Region::Custom {
+            name: "local".to_string(),
+            endpoint: dynamodb_uri,
+        },
+    );
+    println!("Connected to DynamoDB!");
+    Ok(client)
 }
 
 pub async fn populate_database(client: web::Data<Client>) -> mongodb::error::Result<()> {

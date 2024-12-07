@@ -1,6 +1,6 @@
 use actix_web::web;
 
-use crate::{class::{create_class, get_classes_by_unit, get_comments_class}, comment::create_comment, course::{create_complete_course, create_course, get_available_courses, get_comments_course, get_course}, unit::{create_unit, get_units_by_course}};
+use crate::{class::{create_class, get_classes_by_unit, get_comments_class}, comment::create_comment, course::{create_complete_course, create_course, get_available_courses, get_comments_course, get_course}, unit::{create_unit, get_units_by_course}, user::{create_table, create_user, delete_register, get_users, list_tables, login_user, register_course, update_course_status}};
 
 // done
 pub fn unit_config(cfg: &mut web::ServiceConfig) {
@@ -56,4 +56,15 @@ pub fn classy_config(cfg: &mut web::ServiceConfig) {
         web::resource("/classes/comments/{class_id}")
             .route(web::get().to(get_comments_class))
     );
+}
+
+pub fn user_config(cfg: &mut web::ServiceConfig) {
+    cfg.service(list_tables)
+        .service(create_table)
+        .service(create_user)
+        .service(login_user)
+        .service(get_users)
+        .service(update_course_status)
+        .service(register_course)
+        .service(delete_register);
 }
