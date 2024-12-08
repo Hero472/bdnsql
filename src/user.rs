@@ -1,17 +1,21 @@
 use actix_web::{delete, get, post, web, HttpResponse, Responder};
+use chrono::Utc;
 use futures::StreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 use mongodb::bson::oid::ObjectId;
+use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use mongodb::{bson, Collection, Cursor, Database};
 use rusoto_dynamodb::{AttributeValue, DeleteItemInput, DynamoDb, GetItemInput, ListTablesInput, ListTablesOutput, PutItemInput, QueryInput, ScanInput, ScanOutput, UpdateItemInput};
 use rusoto_dynamodb::DynamoDbClient;
 use rusoto_dynamodb::{CreateTableInput, KeySchemaElement, AttributeDefinition, ProvisionedThroughput};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use core::fmt;
 use std::collections::HashMap;
 use maplit::hashmap;
 
 use crate::class::Classy;
+use crate::comment::{Comment, CommentReceive};
 use crate::course::Course;
 use crate::unit::Unit;
 
@@ -22,6 +26,7 @@ pub struct User {
     pub email: String,
     pub password: String,
     pub status: String,
+    pub rating_data: String,
     pub completed_classes: Vec<String>,
     pub completion_percentage: String,
     pub timestamp: String
@@ -93,6 +98,13 @@ pub struct UserCoursesRequest {
 #[derive(Serialize)]
 pub struct CourseId {
     pub course_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RatingRequest {
+    user_email: String,
+    course_id: String,
+    rating: f32,
 }
 
 #[get("dynamodb/tables")]
@@ -187,9 +199,13 @@ pub async fn get_users(client_dynamo: web::Data<DynamoDbClient>) -> impl Respond
                         .get("status")
                         .and_then(|v| v.s.clone())
                         .unwrap_or_default();
-                    let completed_classes: Vec<String>= item
+                    let completed_classes: Vec<String> = item
                         .get("completed_classes")
                         .and_then(|v| v.ss.clone())
+                        .unwrap_or_default();
+                    let rating_data: String = item
+                        .get("rating_data")
+                        .and_then(|v| v.s.clone())
                         .unwrap_or_default();
                     let completion_percentage: String = item
                         .get("completion_percentage")
@@ -206,6 +222,7 @@ pub async fn get_users(client_dynamo: web::Data<DynamoDbClient>) -> impl Respond
                         email,
                         password,
                         status,
+                        rating_data,
                         completed_classes,
                         completion_percentage,
                         timestamp
@@ -329,7 +346,7 @@ pub async fn login_user(client_dynamo: web::Data<DynamoDbClient>, user: web::Jso
     }
 }
 
-// No funciona aun
+// not used lol
 #[post("dynamodb/update_course_status")]
 pub async fn update_course_status(
     client_dynamo: web::Data<DynamoDbClient>,
@@ -751,6 +768,10 @@ pub async fn register_course(
         s: Some(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     });
+    item.insert("rating_data".to_string(), AttributeValue {
+        s: Some("".to_string()),
+        ..Default::default()
+    });
 
     let put_item_input: PutItemInput = PutItemInput {
         table_name: "bdnsql".to_string(),
@@ -833,6 +854,249 @@ pub async fn get_user_courses(
         Err(err) => {
             eprintln!("Failed to fetch user courses from DynamoDB: {:?}", err);
             HttpResponse::InternalServerError().json("Failed to fetch user courses.")
+        }
+    }
+}
+
+#[post("dynamodb/rating")]
+pub async fn post_rating(
+    client_dynamo: web::Data<DynamoDbClient>,
+    client_mongo: web::Data<mongodb::Client>,
+    input_data: web::Json<RatingRequest>,
+) -> impl Responder {
+    // Validate the rating
+    if input_data.rating < 1.0 || input_data.rating > 5.0 {
+        return HttpResponse::BadRequest().json("Rating must be between 1 and 5");
+    }
+
+    // MongoDB: Get the course collection
+    let db: Database = client_mongo.database("local");
+    let courses_collection: Collection<Course> = db.collection("courses");
+
+    // Parse the course ID
+    let course_oid: ObjectId = match ObjectId::parse_str(&input_data.course_id) {
+        Ok(oid) => oid,
+        Err(_) => return HttpResponse::BadRequest().json("Invalid course ID format."),
+    };
+
+    // Find the course and update its rating
+    match courses_collection.find_one(doc! { "_id": course_oid }).await {
+        Ok(Some(course)) => {
+            let current_total_rates: f32 = course.total_rates as f32;
+            let current_rating: f32 = course.rating.unwrap_or(0.0);
+            let new_total_rates: f32 = current_total_rates + 1.0;
+            let new_rating: f32 =
+                (current_rating * current_total_rates + input_data.rating) / new_total_rates;
+
+            // Update the course in MongoDB
+            let update: Document = doc! {
+                "$set": {
+                    "rating": new_rating,
+                },
+                "$inc": {
+                    "total_rates": 1,
+                },
+            };
+
+            if let Err(err) = courses_collection
+                .update_one(doc! { "_id": course_oid }, update)
+                .await
+            {
+                eprintln!("MongoDB error during course update: {}", err);
+                return HttpResponse::InternalServerError().json("Failed to update the course rating.");
+            }
+
+            // DynamoDB: Save the rating under the user's data
+            let rating_entry: serde_json::Value = json!({
+                "course_id": input_data.course_id,
+                "rating": input_data.rating,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+
+            let mut item: HashMap<String, AttributeValue> = HashMap::new();
+
+            let user_pk: String = format!("user#{}", input_data.user_email);
+            if user_pk.is_empty() {
+                eprintln!("Error: User email is missing.");
+                return HttpResponse::BadRequest().json("User email is required.");
+            }
+            item.insert(
+                "PK".to_string(),
+                AttributeValue {
+                    s: Some(user_pk.clone()),
+                    ..Default::default()
+                },
+            );
+
+            // Sort Key
+            let sk: String = format!("course#{}", input_data.course_id);
+            if sk.is_empty() {
+                eprintln!("Error: Course ID is missing.");
+                return HttpResponse::BadRequest().json("Course ID is required.");
+            }
+            item.insert(
+                "SK".to_string(),
+                AttributeValue {
+                    s: Some(sk.clone()),
+                    ..Default::default()
+                },
+            );
+
+            // Add rating data
+            let rating_data: String = rating_entry.to_string();
+            println!("{rating_data}");
+            if rating_data.is_empty() {
+                eprintln!("Error: Rating data is empty.");
+                return HttpResponse::BadRequest().json("Rating data is required.");
+            }
+            item.insert(
+                "rating_data".to_string(),
+                AttributeValue {
+                    s: Some(rating_data.to_string()),
+                    ..Default::default()
+                },
+            );
+
+            // Execute the PutItem operation
+            let dynamo_put = client_dynamo
+                .put_item(PutItemInput {
+                    table_name: "bdnsql".to_string(),
+                    item,
+                    ..Default::default()
+                })
+                .await;
+
+            match dynamo_put {
+                Ok(_) => HttpResponse::Ok().json(json!({
+                    "message": "Rating submitted successfully and saved to user data."
+                })),
+                Err(err) => {
+                    eprintln!("DynamoDB error during submission: {}", err);
+                    HttpResponse::InternalServerError().json("Failed to submit the rating to user data.")
+                }
+            }
+        }
+        Ok(None) => HttpResponse::NotFound().json("Course not found."),
+        Err(err) => {
+            eprintln!("MongoDB error during fetch: {}", err);
+            HttpResponse::InternalServerError().json("Failed to fetch the course.")
+        }
+    }
+}
+
+#[post("dynamodb/create_comment")]
+pub async fn create_comment_user(
+    mongo_client: web::Data<mongodb::Client>,
+    dynamo_client: web::Data<DynamoDbClient>,
+    new_comment: web::Json<CommentReceive>,
+) -> impl Responder {
+    let db: Database = mongo_client.database("local");
+    let collection: Collection<Comment> = db.collection("comments");
+
+    // MongoDB: Create the new comment
+    let new_comment_data: Comment = Comment {
+        id: None,
+        author: new_comment.author.clone(),
+        date: Utc::now(),
+        title: new_comment.title.clone(),
+        detail: new_comment.detail.clone(),
+        likes: 0,
+        dislikes: 0,
+        reference_id: new_comment.reference_id.clone(),
+        reference_type: new_comment.reference_type.clone(),
+    };
+
+    // Insert the comment into MongoDB
+    match collection.insert_one(&new_comment_data).await {
+        Ok(insert_result) => {
+            // Extract the inserted ID
+            let inserted_id: ObjectId = insert_result.inserted_id.as_object_id().unwrap();
+
+            // DynamoDB: Prepare the item
+            let mut item: HashMap<String, AttributeValue> = HashMap::new();
+
+            // Partition Key (PK): "user#<author>"
+            let pk: String = format!(
+                "user#{}",
+                new_comment.author
+            );
+            item.insert(
+                "PK".to_string(),
+                AttributeValue {
+                    s: Some(pk),
+                    ..Default::default()
+                },
+            );
+
+            // Sort Key (SK): "comment#<comment_id>"
+            let sk: String = format!("comment#{}", inserted_id.to_hex());
+            item.insert(
+                "SK".to_string(),
+                AttributeValue {
+                    s: Some(sk),
+                    ..Default::default()
+                },
+            );
+
+            // Additional attributes
+            item.insert(
+                "author".to_string(),
+                AttributeValue {
+                    s: Some(new_comment.author.clone()),
+                    ..Default::default()
+                },
+            );
+            item.insert(
+                "title".to_string(),
+                AttributeValue {
+                    s: Some(new_comment.title.clone()),
+                    ..Default::default()
+                },
+            );
+            item.insert(
+                "detail".to_string(),
+                AttributeValue {
+                    s: Some(new_comment.detail.clone()),
+                    ..Default::default()
+                },
+            );
+            item.insert(
+                "date".to_string(),
+                AttributeValue {
+                    s: Some(Utc::now().to_rfc3339()),
+                    ..Default::default()
+                },
+            );
+            item.insert(
+                "type".to_string(),
+                AttributeValue {
+                    s: Some(new_comment.reference_type.to_string()),
+                    ..Default::default()
+                },
+            );
+
+            // Insert the item into DynamoDB
+            let dynamo_put = dynamo_client
+                .put_item(PutItemInput {
+                    table_name: "bdnsql".to_string(),
+                    item,
+                    ..Default::default()
+                })
+                .await;
+
+            match dynamo_put {
+                Ok(_) => HttpResponse::Ok().json(json!({
+                    "message": "Rating submitted successfully and saved to user data."
+                })),
+                Err(err) => {
+                    eprintln!("DynamoDB error during submission: {}", err);
+                    HttpResponse::InternalServerError().json("Failed to submit the rating to user data.")
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("MongoDB error: {}", err);
+            HttpResponse::InternalServerError().body("Failed to save the comment in MongoDB")
         }
     }
 }

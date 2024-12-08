@@ -15,12 +15,14 @@ pub struct Course {
     description: String,
     #[serde(rename = "rating")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    rating: Option<f32>,
+    pub rating: Option<f32>,
+    pub total_rates: usize,
     image: String,
     image_banner: String,
     pub units: Vec<ObjectId>,
     inscribed: u64
 }
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CourseReceive {
     name: String,
@@ -44,7 +46,7 @@ pub struct CourseSummary {
     name: String,
     description: String,
     image_banner: String,
-    rating: Option<f32>,
+    rating: Option<f32>
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +70,7 @@ pub async fn create_course(client: web::Data<Client>, new_course: web::Json<Cour
         name: new_course.name.clone(),
         description: new_course.description.clone(),
         rating: new_course.rating.clone(),
+        total_rates: 0,
         image: new_course.image.clone(),
         image_banner: new_course.image_banner.clone(),
         units: Vec::new(),
@@ -93,6 +96,7 @@ pub async fn create_complete_course(client: web::Data<Client>, full_course: web:
         image: full_course.image.clone(),
         image_banner: full_course.image_banner.clone(),
         rating: None,
+        total_rates: 0,
         units: Vec::new(),
         inscribed: 0,
     };

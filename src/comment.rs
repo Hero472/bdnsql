@@ -18,19 +18,28 @@ impl From<TypeComment> for Bson {
     }
 }
 
+impl std::fmt::Display for TypeComment {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            TypeComment::Class => write!(f, "Class"),
+            TypeComment::Course => write!(f, "Course"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Comment {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
-    id: Option<ObjectId>,
-    author: String,
-    date: DateTime<Utc>,
-    title: String,
-    detail: String,
-    likes: usize,
-    dislikes: usize,
+    pub(crate) id: Option<ObjectId>,
+    pub(crate) author: String,
+    pub(crate) date: DateTime<Utc>,
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    pub(crate) likes: usize,
+    pub(crate) dislikes: usize,
     #[serde(rename = "_reference_id", skip_serializing_if = "Option::is_none")]
-    reference_id: Option<ObjectId>,
-    reference_type: TypeComment
+    pub(crate) reference_id: Option<ObjectId>,
+    pub(crate) reference_type: TypeComment
 }
 
 impl Comment {
@@ -61,11 +70,11 @@ impl Comment {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommentReceive {
-    author: String,
-    title: String,
-    detail: String,
-    reference_id: Option<ObjectId>,
-    reference_type: TypeComment
+    pub(crate) author: String,
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    pub(crate) reference_id: Option<ObjectId>,
+    pub(crate) reference_type: TypeComment
 }
 
 #[derive(Debug, Serialize, Deserialize)]
