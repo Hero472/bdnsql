@@ -20,3 +20,4 @@ clap = { version = "4.5.23", features = ["derive"] }
 rusoto_dynamodb = "0.48.0"
 rusoto_core = "0.48"
 rusoto_credential = "0.48"
+maplit = "1.0"

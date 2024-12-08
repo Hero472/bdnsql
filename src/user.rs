@@ -1,13 +1,19 @@
 use actix_web::{delete, get, post, web, HttpResponse, Responder};
+use futures::StreamExt;
 use mongodb::bson::doc;
-use mongodb::{bson, Collection, Database};
-use rusoto_dynamodb::{AttributeValue, DeleteItemInput, DynamoDb, GetItemInput, ListTablesInput, ListTablesOutput, PutItemInput, ScanInput, ScanOutput};
+use mongodb::bson::oid::ObjectId;
+use mongodb::{bson, Collection, Cursor, Database};
+use rusoto_dynamodb::{AttributeValue, DeleteItemInput, DynamoDb, GetItemInput, ListTablesInput, ListTablesOutput, PutItemInput, QueryInput, ScanInput, ScanOutput, UpdateItemInput};
 use rusoto_dynamodb::DynamoDbClient;
 use rusoto_dynamodb::{CreateTableInput, KeySchemaElement, AttributeDefinition, ProvisionedThroughput};
 use serde::{Deserialize, Serialize};
+use core::fmt;
 use std::collections::HashMap;
+use maplit::hashmap;
 
+use crate::class::Classy;
 use crate::course::Course;
+use crate::unit::Unit;
 
 #[derive(Serialize, Deserialize)]
 pub struct User {
@@ -16,6 +22,8 @@ pub struct User {
     pub email: String,
     pub password: String,
     pub status: String,
+    pub completed_classes: Vec<String>,
+    pub completion_percentage: String,
     pub timestamp: String
 }
 
@@ -41,11 +49,28 @@ impl Status {
     }
 }
 
+impl fmt::Display for Status {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Status::Initiated => write!(f, "Initiated"),
+            Status::InProgress(progress) => write!(f, "In Progress: {:.2}%", progress),
+            Status::Completed => write!(f, "Completed"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CourseStatusUpdate {
     pub user_email: String,
     pub course_id: String,
     pub status: Status
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CompleteClass {
+    pub user_email: String,
+    pub course_id: String,
+    pub class_id: String
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,6 +82,16 @@ pub struct CourseStatusRegister {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteRegisterRequest {
     pub user_email: String,
+    pub course_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserCoursesRequest {
+    pub user_email: String,
+}
+
+#[derive(Serialize)]
+pub struct CourseId {
     pub course_id: String,
 }
 
@@ -152,6 +187,14 @@ pub async fn get_users(client_dynamo: web::Data<DynamoDbClient>) -> impl Respond
                         .get("status")
                         .and_then(|v| v.s.clone())
                         .unwrap_or_default();
+                    let completed_classes: Vec<String>= item
+                        .get("completed_classes")
+                        .and_then(|v| v.ss.clone())
+                        .unwrap_or_default();
+                    let completion_percentage: String = item
+                        .get("completion_percentage")
+                        .and_then(|v| v.n.clone())
+                        .unwrap_or_default();
                     let timestamp: String = item
                         .get("timestamp")
                         .and_then(|v| v.s.clone())
@@ -163,6 +206,8 @@ pub async fn get_users(client_dynamo: web::Data<DynamoDbClient>) -> impl Respond
                         email,
                         password,
                         status,
+                        completed_classes,
+                        completion_percentage,
                         timestamp
                     };
 
@@ -288,6 +333,7 @@ pub async fn login_user(client_dynamo: web::Data<DynamoDbClient>, user: web::Jso
 #[post("dynamodb/update_course_status")]
 pub async fn update_course_status(
     client_dynamo: web::Data<DynamoDbClient>,
+    client_mongo: web::Data<mongodb::Client>,
     course_status: web::Json<CourseStatusUpdate>,
 ) -> impl Responder {
     if let Err(err) = course_status.status.validate() {
@@ -297,10 +343,86 @@ pub async fn update_course_status(
     let pk: String = format!("user#{}", course_status.user_email.clone());
     let sk: String = format!("course#{}", course_status.course_id);
 
-    let status_value: String = serde_json::to_string(&course_status.status)
-        .map_err(|err| format!("Failed to serialize status: {:?}", err))
-        .unwrap();
+    let db: Database = client_mongo.database("local");
+    //let courses_collection: Collection<Course> = db.collection::<Course>("courses");
+    let units_collection: Collection<Unit> = db.collection::<Unit>("units");
+    let classes_collection: Collection<Classy> = db.collection::<Classy>("classes");
 
+    let course_oid = match bson::oid::ObjectId::parse_str(&course_status.course_id) {
+        Ok(oid) => oid,
+        Err(_) => {
+            return HttpResponse::BadRequest().json("Invalid course ID format.");
+        }
+    };
+
+    // Find all units of the course
+    let mut units_cursor: Cursor<Unit> = match units_collection.find(doc! { "_course_id": course_oid }).await {
+        Ok(cursor) => cursor,
+        Err(err) => {
+            eprintln!("Failed to fetch units: {:?}", err);
+            return HttpResponse::InternalServerError().json("Failed to fetch units.");
+        }
+    };
+
+    let total_classes: usize;
+    let mut unit_ids: Vec<ObjectId> = Vec::new();
+
+    while let Some(result) = units_cursor.next().await {
+        match result {
+            Ok(unit) => {
+                if let Some(id) = unit.id {
+                    unit_ids.push(id);
+                }
+            }
+            Err(err) => {
+                eprintln!("Error reading unit: {:?}", err);
+                return HttpResponse::InternalServerError().json("Failed to read unit.");
+            }
+        }
+    }
+
+    match classes_collection.count_documents(doc! { "_unit_id": { "$in": &unit_ids } }).await {
+        Ok(count) => total_classes = count as usize,
+        Err(err) => {
+            eprintln!("Failed to count classes: {:?}", err);
+            return HttpResponse::InternalServerError().json("Failed to count classes.");
+        }
+    }
+
+    let get_item_input: GetItemInput = GetItemInput {
+        table_name: "bdnsql".to_string(),
+        key: hashmap! {
+            "PK".to_string() => AttributeValue { s: Some(pk.clone()), ..Default::default() },
+            "SK".to_string() => AttributeValue { s: Some(sk.clone()), ..Default::default() },
+        },
+        ..Default::default()
+    };
+
+    let completed_classes = match client_dynamo.get_item(get_item_input).await {
+        Ok(output) => {
+            if let Some(item) = output.item {
+                item.get("completed_classes")
+                    .and_then(|val| val.ss.as_ref()) // Get the string set
+                    .map(|set| set.len()) // Get the length of the list
+                    .unwrap_or(0) // Default to 0 if the key doesn't exist or is empty
+            } else {
+                0
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to fetch completed classes from DynamoDB: {:?}", err);
+            return HttpResponse::InternalServerError().json("Failed to fetch completed classes.");
+        }
+    };
+
+    // Calculate completion percentage
+    let completion_percentage: u64 = if total_classes > 0 {
+        ((completed_classes as f64 / total_classes as f64) * 100.0).round() as u64
+    } else {
+        0
+    };
+
+    // Update DynamoDB with the new percentage
     let mut item: HashMap<String, AttributeValue> = HashMap::new();
     item.insert("PK".to_string(), AttributeValue {
         s: Some(pk.clone()),
@@ -311,7 +433,11 @@ pub async fn update_course_status(
         ..Default::default()
     });
     item.insert("status".to_string(), AttributeValue {
-        s: Some(status_value),
+        s: Some(serde_json::to_string(&course_status.status).unwrap()),
+        ..Default::default()
+    });
+    item.insert("completion_percentage".to_string(), AttributeValue {
+        n: Some(completion_percentage.to_string()),
         ..Default::default()
     });
     item.insert("timestamp".to_string(), AttributeValue {
@@ -327,15 +453,230 @@ pub async fn update_course_status(
 
     match client_dynamo.put_item(put_item_input).await {
         Ok(_) => {
-            println!("Course status updated successfully!");
+            println!("Course status and percentage updated successfully!");
             HttpResponse::Ok().json(format!(
-                "Status for course {} updated to {:?}",
-                course_status.course_id, course_status.status
+                "Status for course {} updated to {:?} with {}% completion",
+                course_status.course_id, course_status.status, completion_percentage
             ))
         }
         Err(err) => {
             eprintln!("Failed to update course status: {:?}", err);
             HttpResponse::InternalServerError().json(format!("Error: {:?}", err))
+        }
+    }
+
+}
+
+#[post("dynamodb/complete_class")]
+pub async fn complete_class(
+    client_dynamo: web::Data<DynamoDbClient>,
+    client_mongo: web::Data<mongodb::Client>,
+    input_data: web::Json<CompleteClass>
+) -> impl Responder {
+    // Validate ObjectId for course and class
+    let course_oid: ObjectId = match mongodb::bson::oid::ObjectId::parse_str(&input_data.course_id) {
+        Ok(oid) => oid,
+        Err(_) => return HttpResponse::BadRequest().json("Invalid course ID format."),
+    };
+
+    let class_oid: ObjectId = match mongodb::bson::oid::ObjectId::parse_str(&input_data.class_id) {
+        Ok(oid) => oid,
+        Err(_) => return HttpResponse::BadRequest().json("Invalid class ID format."),
+    };
+
+    // MongoDB: Check if the class is part of the course
+    let db: Database = client_mongo.database("local");
+    let classes_collection: Collection<Classy> = db.collection::<Classy>("classes");
+    match classes_collection
+        .find_one(doc! { "_id": class_oid.clone() })
+        .await
+    {
+        Ok(Some(_)) => {} // Class exists in the course, proceed
+        Ok(None) => return HttpResponse::NotFound().json("Class not found in the course."),
+        Err(err) => {
+            eprintln!("Failed to query class in MongoDB: {:?}", err);
+            return HttpResponse::InternalServerError().json("Failed to query class.");
+        }
+    }
+
+    // DynamoDB: Check if user is registered in the course
+    let pk: String = format!("user#{}", input_data.user_email);
+    let sk: String = format!("course#{}", course_oid.to_hex());
+    let mut key: HashMap<String, AttributeValue> = HashMap::new();
+    key.insert(
+        "PK".to_string(),
+        AttributeValue {
+            s: Some(pk.clone()),
+            ..Default::default()
+        },
+    );
+    key.insert(
+        "SK".to_string(),
+        AttributeValue {
+            s: Some(sk.clone()),
+            ..Default::default()
+        },
+    );
+
+    let get_item_input: GetItemInput = GetItemInput {
+        table_name: "bdnsql".to_string(),
+        key: key.clone(),
+        ..Default::default()
+    };
+
+    let registered: bool = match client_dynamo.get_item(get_item_input).await {
+        Ok(output) => output.item.is_some(),
+        Err(err) => {
+            eprintln!("Failed to check registration in DynamoDB: {:?}", err);
+            return HttpResponse::InternalServerError().json("Failed to check user registration.");
+        }
+    };
+
+    if !registered {
+        return HttpResponse::BadRequest().json("User is not registered in the course.");
+    }
+
+    // DynamoDB: Add class to the completed list
+    let mut expression_attribute_values: HashMap<String, AttributeValue> = HashMap::new();
+    expression_attribute_values.insert(
+        ":class_id".to_string(),
+        AttributeValue {
+            ss: Some(vec![class_oid.to_hex()]),
+            ..Default::default()
+        },
+    );
+
+    let update_item_input: UpdateItemInput = UpdateItemInput {
+        table_name: "bdnsql".to_string(),
+        key: key.clone(),
+        update_expression: Some("ADD completed_classes :class_id".to_string()),
+        expression_attribute_values: Some(expression_attribute_values),
+        ..Default::default()
+    };
+
+    match client_dynamo.update_item(update_item_input).await {
+        Ok(_) => {
+            println!("Advance in Course");
+
+            // Fetch the updated data to calculate the new completion percentage
+            let get_item_input: GetItemInput = GetItemInput {
+                table_name: "bdnsql".to_string(),
+                key: key.clone(),
+                ..Default::default()
+            };
+
+            let course_item: Option<HashMap<String, AttributeValue>> = match client_dynamo.get_item(get_item_input).await {
+                Ok(output) => output.item,
+                Err(err) => {
+                    eprintln!("Failed to fetch course data: {:?}", err);
+                    return HttpResponse::InternalServerError().json("Failed to fetch course data.");
+                }
+            };
+
+            if let Some(item) = course_item {
+                let completed_classes = item
+                    .get("completed_classes")
+                    .and_then(|val| val.ss.as_ref())
+                    .map(|set| set.len())
+                    .unwrap_or(0);
+
+                // MongoDB: Find the total number of classes for this course
+                let mut units_cursor: Cursor<Unit> = match db
+                    .collection::<Unit>("units")
+                    .find(doc! { "_course_id": course_oid })
+                    .await
+                {
+                    Ok(cursor) => cursor,
+                    Err(err) => {
+                        eprintln!("Failed to fetch units: {:?}", err);
+                        return HttpResponse::InternalServerError().json("Failed to fetch units.");
+                    }
+                };
+
+                let mut unit_ids: Vec<ObjectId> = Vec::new();
+                while let Some(unit) = units_cursor.next().await {
+                    match unit {
+                        Ok(unit) => unit_ids.push(unit.id.unwrap()),
+                        Err(err) => {
+                            eprintln!("Failed to read unit: {:?}", err);
+                            return HttpResponse::InternalServerError().json("Failed to read unit.");
+                        }
+                    }
+                }
+
+                let total_classes: usize = match db
+                    .collection::<Classy>("classes")
+                    .count_documents(doc! { "_unit_id": { "$in": &unit_ids } })
+                    .await
+                {
+                    Ok(count) => count as usize,
+                    Err(err) => {
+                        eprintln!("Failed to count classes: {:?}", err);
+                        return HttpResponse::InternalServerError().json("Failed to count classes.");
+                    }
+                };
+
+                // Calculate new completion percentage
+                let completion_percentage: u64 = if total_classes > 0 {
+                    ((completed_classes as f64 / total_classes as f64) * 100.0).round() as u64
+                } else {
+                    0
+                };
+
+                let item_to_update: HashMap<String, AttributeValue> = HashMap::new();
+
+                // Fetch existing completed_classes (if any), or initialize a new empty list if none
+                let mut completed_classes: Vec<String> = match item_to_update.get("completed_classes") {
+                    Some(value) => match &value.ss {
+                        Some(classes) => classes.clone(),
+                        None => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
+
+                let course_status = if completion_percentage >= 100 {
+                    Status::Completed
+                } else {
+                    Status::InProgress(completion_percentage as f32)
+                };
+
+                // Add the new class ID to the list
+                completed_classes.push(class_oid.to_string());
+                
+                // Update DynamoDB with new status and percentage
+                let mut item_to_update: HashMap<String, AttributeValue> = HashMap::new();
+                item_to_update.insert("PK".to_string(), AttributeValue { s: Some(pk.clone()), ..Default::default() });
+                item_to_update.insert("SK".to_string(), AttributeValue { s: Some(sk.clone()), ..Default::default() });
+                item_to_update.insert("status".to_string(), AttributeValue { s: Some(course_status.to_string()), ..Default::default() });
+                item_to_update.insert("completed_classes".to_string(), AttributeValue { ss: Some(completed_classes.clone()), ..Default::default() });
+                item_to_update.insert("completion_percentage".to_string(), AttributeValue { n: Some(completion_percentage.to_string()), ..Default::default() });
+                item_to_update.insert("timestamp".to_string(), AttributeValue { s: Some(chrono::Utc::now().to_rfc3339()), ..Default::default() });
+
+                let put_item_input = PutItemInput {
+                    table_name: "bdnsql".to_string(),
+                    item: item_to_update,
+                    ..Default::default()
+                };
+
+                match client_dynamo.put_item(put_item_input).await {
+                    Ok(_) => {
+                        HttpResponse::Ok().json(format!(
+                            "Class completed and course updated to InProgress with {}% completion.",
+                            completion_percentage
+                        ))
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to update course status: {:?}", err);
+                        HttpResponse::InternalServerError().json("Failed to update course status.")
+                    }
+                }
+            } else {
+                HttpResponse::InternalServerError().json("Failed to retrieve course item.")
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to update completed classes in DynamoDB: {:?}", err);
+            HttpResponse::InternalServerError().json("Failed to mark class as completed.")
         }
     }
 }
@@ -402,6 +743,10 @@ pub async fn register_course(
         s: Some(status_value),
         ..Default::default()
     });
+    item.insert("completion_percentage".to_string(), AttributeValue {
+        n: Some(0.to_string()),
+        ..Default::default()
+    });
     item.insert("timestamp".to_string(), AttributeValue {
         s: Some(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
@@ -445,6 +790,49 @@ pub async fn register_course(
         Err(err) => {
             eprintln!("Failed to update course inscribed count in MongoDB: {:?}", err);
             HttpResponse::InternalServerError().json(format!("MongoDB error: {:?}", err))
+        }
+    }
+}
+
+#[get("dynamodb/get_user_courses")]
+pub async fn get_user_courses(
+    client_dynamo: web::Data<DynamoDbClient>,
+    input_data: web::Json<UserCoursesRequest>,
+) -> impl Responder {
+    let pk: String = format!("user#{}", input_data.user_email);
+
+    // Construct the QueryInput to fetch all courses associated with the user
+    let query_input = QueryInput {
+        table_name: "bdnsql".to_string(),
+        key_condition_expression: Some("PK = :pk and begins_with(SK, :sk_prefix)".to_string()),
+        expression_attribute_values: Some(hashmap! {
+            ":pk".to_string() => AttributeValue { s: Some(pk.clone()), ..Default::default() },
+            ":sk_prefix".to_string() => AttributeValue { s: Some("course#".to_string()), ..Default::default() },
+        }),
+        ..Default::default()
+    };
+
+    match client_dynamo.query(query_input).await {
+        Ok(output) => {
+            // Process the query results and collect course IDs
+            if let Some(items) = output.items {
+                let course_ids: Vec<CourseId> = items.into_iter().filter_map(|item| {
+                    item.get("SK").and_then(|val| val.s.clone()).map(|sk| {
+                        CourseId {
+                            course_id: sk.strip_prefix("course#").unwrap_or_default().to_string(),
+                        }
+                    })
+                }).collect();
+
+                // Return the list of course IDs
+                HttpResponse::Ok().json(course_ids)
+            } else {
+                HttpResponse::NotFound().json("No courses found for the user.")
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to fetch user courses from DynamoDB: {:?}", err);
+            HttpResponse::InternalServerError().json("Failed to fetch user courses.")
         }
     }
 }
