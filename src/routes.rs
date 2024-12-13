@@ -1,6 +1,6 @@
 use actix_web::web;
 
-use crate::{class::{create_class, get_classes_by_unit, get_comments_class}, comment::create_comment, course::{create_complete_course, create_course, get_available_courses, get_comments_course, get_course}, unit::{create_unit, get_units_by_course}, user::{complete_class, create_comment_user, create_table, create_user, delete_register, get_user_courses, get_users, list_tables, login_user, post_rating, register_course, update_course_status}};
+use crate::{class::{create_class, get_classes_by_unit, get_comments_class}, comment::create_comment, course::{create_complete_course, create_course, get_available_courses, get_comments_course, get_course}, unit::{create_unit, get_units_by_course}, user::{complete_class, create_comment_user, create_comment_user_neo4j, create_table, create_user, delete_register, get_user_courses, get_users, list_tables, login_user, post_rating, post_rating_neo4j, register_course, update_course_status}};
 
 pub fn unit_config(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -66,5 +66,7 @@ pub fn user_config(cfg: &mut web::ServiceConfig) {
         .service(complete_class)
         .service(get_user_courses)
         .service(post_rating)
-        .service(create_comment_user);
+        .service(create_comment_user)
+        .service(post_rating_neo4j)
+        .service(create_comment_user_neo4j);
 }

@@ -2,6 +2,7 @@ use clap::{command, Parser};
 use class::ClassyReceive;
 use course::{create_complete_course, FullCourse};
 use mongodb::{options::ClientOptions, Client};
+use neo4rs::Graph;
 use routes::{classy_config, comment_config, courses_config, unit_config, user_config};
 use unit::UnitFullCourse;
 use std::env;
@@ -33,8 +34,10 @@ async fn main() -> mongodb::error::Result<()> {
     
     let cli: Cli = Cli::parse();
 
-    let client_mongo: Client = initialize_mongo().await?;
-    let client_dynamo: DynamoDbClient = initialize_dynamo().unwrap();
+    let client_mongo = initialize_mongo().await?;
+    let client_dynamo = initialize_dynamo().unwrap();
+    let client_neo4j = initialize_neo4j().await.unwrap();
+
 
     if cli.populate {
         println!("Populating the database...");
@@ -46,6 +49,7 @@ async fn main() -> mongodb::error::Result<()> {
         App::new()
             .app_data(web::Data::new(client_mongo.clone()))
             .app_data(web::Data::new(client_dynamo.clone()))
+            .app_data(web::Data::new(client_neo4j.clone()))
             .configure(unit_config) 
             .configure(courses_config)
             .configure(comment_config)
@@ -83,6 +87,16 @@ fn initialize_dynamo() -> Result<DynamoDbClient, Box<dyn std::error::Error>> {
     );
     println!("Connected to DynamoDB!");
     Ok(client)
+}
+
+async fn initialize_neo4j() -> Result<Graph, Box<dyn std::error::Error>> {
+    let neo4j_uri = env::var("NEO4J_URI").expect("Expected NEO4J_URI in env");
+    let neo4j_user = env::var("NEO4J_USERNAME").expect("Expected NEO4J_USERNAME in env");
+    let neo4j_pass = env::var("NEO4J_PASSWORD").expect("Expected NEO4J_PASSWORD in env");
+
+    let graph = Graph::new(&neo4j_uri, &neo4j_user, &neo4j_pass).await?;
+    println!("Connected to Neo4j!");
+    Ok(graph)
 }
 
 pub async fn populate_database(client: web::Data<Client>) -> mongodb::error::Result<()> {

@@ -3,7 +3,6 @@ use chrono::Utc;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::bson::oid::ObjectId;
-use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use mongodb::{bson, Collection, Cursor, Database};
 use neo4rs::{query, Graph};
 use rusoto_dynamodb::{AttributeValue, DeleteItemInput, DynamoDb, GetItemInput, ListTablesInput, ListTablesOutput, PutItemInput, QueryInput, ScanInput, ScanOutput, UpdateItemInput};
@@ -860,7 +859,7 @@ pub async fn get_user_courses(
 }
 
 #[post("neo4j/rating")]
-pub async fn post_rating(
+pub async fn post_rating_neo4j(
     neo4j_graph: web::Data<Graph>,
     client_mongo: web::Data<mongodb::Client>,
     input_data: web::Json<RatingRequest>,
@@ -869,20 +868,18 @@ pub async fn post_rating(
     if input_data.rating < 1.0 || input_data.rating > 5.0 {
         return HttpResponse::BadRequest().json("Rating must be between 1 and 5");
     }
-
     // MongoDB: Get the course collection
     let db: Database = client_mongo.database("local");
     let courses_collection: Collection<Course> = db.collection("courses");
-
     // Parse the course ID
     let course_oid: ObjectId = match ObjectId::parse_str(&input_data.course_id) {
         Ok(oid) => oid,
         Err(_) => return HttpResponse::BadRequest().json("Invalid course ID format."),
     };
-
     // Find the course and update its rating
     match courses_collection.find_one(doc! { "_id": course_oid }).await {
         Ok(Some(course)) => {
+            println!("if course is found");
             let current_total_rates: f32 = course.total_rates as f32;
             let current_rating: f32 = course.rating.unwrap_or(0.0);
             let new_total_rates: f32 = current_total_rates + 1.0;
@@ -936,7 +933,7 @@ pub async fn post_rating(
 }
 
 #[post("dynamodb/rating")]
-pub async fn post_rating_neo4j(
+pub async fn post_rating(
     client_dynamo: web::Data<DynamoDbClient>,
     client_mongo: web::Data<mongodb::Client>,
     input_data: web::Json<RatingRequest>,
@@ -1264,7 +1261,6 @@ pub async fn create_comment_user_neo4j(
         }
     }
 }
-
 
 #[delete("dynamodb/delete_register")]
 pub async fn delete_register(
