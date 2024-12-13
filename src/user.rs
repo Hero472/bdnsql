@@ -5,6 +5,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::bson::oid::ObjectId;
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use mongodb::{bson, Collection, Cursor, Database};
+use neo4rs::{query, Graph};
 use rusoto_dynamodb::{AttributeValue, DeleteItemInput, DynamoDb, GetItemInput, ListTablesInput, ListTablesOutput, PutItemInput, QueryInput, ScanInput, ScanOutput, UpdateItemInput};
 use rusoto_dynamodb::DynamoDbClient;
 use rusoto_dynamodb::{CreateTableInput, KeySchemaElement, AttributeDefinition, ProvisionedThroughput};
@@ -858,8 +859,84 @@ pub async fn get_user_courses(
     }
 }
 
-#[post("dynamodb/rating")]
+#[post("neo4j/rating")]
 pub async fn post_rating(
+    neo4j_graph: web::Data<Graph>,
+    client_mongo: web::Data<mongodb::Client>,
+    input_data: web::Json<RatingRequest>,
+) -> impl Responder {
+    // Validate the rating
+    if input_data.rating < 1.0 || input_data.rating > 5.0 {
+        return HttpResponse::BadRequest().json("Rating must be between 1 and 5");
+    }
+
+    // MongoDB: Get the course collection
+    let db: Database = client_mongo.database("local");
+    let courses_collection: Collection<Course> = db.collection("courses");
+
+    // Parse the course ID
+    let course_oid: ObjectId = match ObjectId::parse_str(&input_data.course_id) {
+        Ok(oid) => oid,
+        Err(_) => return HttpResponse::BadRequest().json("Invalid course ID format."),
+    };
+
+    // Find the course and update its rating
+    match courses_collection.find_one(doc! { "_id": course_oid }).await {
+        Ok(Some(course)) => {
+            let current_total_rates: f32 = course.total_rates as f32;
+            let current_rating: f32 = course.rating.unwrap_or(0.0);
+            let new_total_rates: f32 = current_total_rates + 1.0;
+            let new_rating: f32 =
+                (current_rating * current_total_rates + input_data.rating) / new_total_rates;
+
+            // Update the course in MongoDB
+            let update: Document = doc! {
+                "$set": {
+                    "rating": new_rating,
+                },
+                "$inc": {
+                    "total_rates": 1,
+                },
+            };
+
+
+
+            match courses_collection.update_one( doc! { "_id": course_oid }, update).await {
+                Ok(_) => {
+                    // Register the rating in Neo4j
+                    let neo4j_query = query(
+                        "MERGE (u:User {email: $email}) \
+                         MERGE (c:Course {id: $course_id}) \
+                         CREATE (u)-[:RATED {rating: $rating, timestamp: $timestamp}]->(c)")
+                        .param("email", input_data.user_email.clone())
+                        .param("course_id", input_data.course_id.clone())
+                        .param("rating", input_data.rating)
+                        .param("timestamp", chrono::Utc::now().to_rfc3339());
+        
+                    if let Err(err) = neo4j_graph.run(neo4j_query).await {
+                        eprintln!("Neo4j error during rating registration: {}", err);
+                        return HttpResponse::InternalServerError().json("Failed to register rating in Neo4j.");
+                    }
+        
+                    HttpResponse::Ok().json("Rating submitted successfully.")
+                },
+                Err(err) => {
+                    eprintln!("Database error during rating update: {}", err);
+                    HttpResponse::InternalServerError().json("Failed to update course rating.")
+                }
+            }
+
+        }
+        Ok(None) => HttpResponse::NotFound().json("Course not found."),
+        Err(err) => {
+            eprintln!("MongoDB error during fetch: {}", err);
+            HttpResponse::InternalServerError().json("Failed to fetch the course.")
+        }
+    }
+}
+
+#[post("dynamodb/rating")]
+pub async fn post_rating_neo4j(
     client_dynamo: web::Data<DynamoDbClient>,
     client_mongo: web::Data<mongodb::Client>,
     input_data: web::Json<RatingRequest>,
@@ -984,6 +1061,7 @@ pub async fn post_rating(
     }
 }
 
+
 #[post("dynamodb/create_comment")]
 pub async fn create_comment_user(
     mongo_client: web::Data<mongodb::Client>,
@@ -1100,6 +1178,93 @@ pub async fn create_comment_user(
         }
     }
 }
+
+#[post("neo4j/create_comment")]
+pub async fn create_comment_user_neo4j(
+    mongo_client: web::Data<mongodb::Client>,
+    neo4j_graph: web::Data<Graph>,
+    new_comment: web::Json<CommentReceive>,
+) -> impl Responder {
+    let db: Database = mongo_client.database("local");
+    let collection: Collection<Comment> = db.collection("comments");
+
+    // MongoDB: Create the new comment
+    let new_comment_data: Comment = Comment {
+        id: None,
+        author: new_comment.author.clone(),
+        date: Utc::now(),
+        title: new_comment.title.clone(),
+        detail: new_comment.detail.clone(),
+        likes: 0,
+        dislikes: 0,
+        reference_id: new_comment.reference_id.clone(),
+        reference_type: new_comment.reference_type.clone(),
+    };
+
+    // Insert the comment into MongoDB
+    match collection.insert_one(&new_comment_data).await {
+        Ok(insert_result) => {
+            // Extract the inserted ID
+            let inserted_id: ObjectId = insert_result.inserted_id.as_object_id().unwrap();
+
+            let mut params = HashMap::new();
+            params.insert("author", new_comment.author.clone().into());
+            params.insert("comment_id", inserted_id.to_hex().into());
+            params.insert("title", new_comment.title.clone().into());
+            params.insert("detail", new_comment.detail.clone().into());
+            params.insert("date", Utc::now().to_rfc3339().into());
+            params.insert("reference_id", new_comment.reference_id.clone().into());
+            params.insert("reference_type", new_comment.reference_type.clone().into());
+
+            let cypher_query = "
+                MATCH (user:User {email: $author})
+                CREATE (comment:Comment {
+                    id: $comment_id,
+                    title: $title,
+                    detail: $detail,
+                    date: $date,
+                    reference_id: $reference_id,
+                    reference_type: $reference_type,
+                    likes: 0,
+                    dislikes: 0
+                })
+                CREATE (user)-[:POSTED]->(comment)
+            ";
+
+            let graph = neo4j_graph.get_ref();
+            match graph
+                .execute(
+                    query(
+                        "CREATE (c:Comment {
+                            comment_id: $comment_id, 
+                            author: $author, 
+                            title: $title, 
+                            detail: $detail, 
+                            date: $date, 
+                            reference_id: $reference_id, 
+                            reference_type: $reference_type
+                        })",
+                    )
+                    .params(params),
+                )
+                .await
+            {
+                Ok(_) => HttpResponse::Ok().json(json!({
+                    "message": "Comment successfully created in MongoDB and Neo4j"
+                })),
+                Err(err) => {
+                    eprintln!("Neo4j error: {}", err);
+                    HttpResponse::InternalServerError().body("Failed to save the comment in Neo4j")
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("MongoDB error: {}", err);
+            HttpResponse::InternalServerError().body("Failed to save the comment in MongoDB")
+        }
+    }
+}
+
 
 #[delete("dynamodb/delete_register")]
 pub async fn delete_register(
