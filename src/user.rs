@@ -1207,29 +1207,29 @@ pub async fn create_comment_user_neo4j(
             // Extract the inserted ID
             let inserted_id: ObjectId = insert_result.inserted_id.as_object_id().unwrap();
 
-            let mut params = HashMap::new();
+            let mut params: HashMap<&str, String> = HashMap::new();
             params.insert("author", new_comment.author.clone().into());
             params.insert("comment_id", inserted_id.to_hex().into());
             params.insert("title", new_comment.title.clone().into());
             params.insert("detail", new_comment.detail.clone().into());
             params.insert("date", Utc::now().to_rfc3339().into());
-            params.insert("reference_id", new_comment.reference_id.clone().into());
-            params.insert("reference_type", new_comment.reference_type.clone().into());
+            
+            if let Some(reference_id) = new_comment.reference_id {
+                params.insert("reference_id", reference_id.to_string());
+            } else {
+                params.insert("reference_id", "null".to_string()); // Or handle null as needed
+            }
+            
+            // Convert reference_type to String
+            params.insert(
+                "reference_type",
+                new_comment.reference_type.to_string(), // Ensure to_string is implemented for reference_type
+            );
 
-            let cypher_query = "
-                MATCH (user:User {email: $author})
-                CREATE (comment:Comment {
-                    id: $comment_id,
-                    title: $title,
-                    detail: $detail,
-                    date: $date,
-                    reference_id: $reference_id,
-                    reference_type: $reference_type,
-                    likes: 0,
-                    dislikes: 0
-                })
-                CREATE (user)-[:POSTED]->(comment)
-            ";
+            params.insert(
+                "reference_type",
+                new_comment.reference_type.to_string(), // Ensure to_string is implemented for reference_type
+            );
 
             let graph = neo4j_graph.get_ref();
             match graph
