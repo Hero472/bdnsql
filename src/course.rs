@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use futures::StreamExt;
+use neo4rs::{query, Graph};
 use serde::{Deserialize, Serialize};
 use mongodb::bson::oid::ObjectId;
 
@@ -55,18 +58,24 @@ pub struct CourseWithComments {
     comments: Vec<CommentSend>,
 }
 
-pub async fn create_course(client: web::Data<Client>, new_course: web::Json<CourseReceive>) -> impl Responder {
+pub async fn create_course(
+    client: web::Data<Client>,
+    neo4j_client: web::Data<Graph>,
+    new_course: web::Json<CourseReceive>
+) -> impl Responder {
     let db: Database = client.database("local");
     let collection: Collection<Course> = db.collection("courses");
     
+    // Validate rating if provided
     if let Some(rating) = new_course.rating {
         if rating < 1.0 || rating > 5.0 {
             return HttpResponse::BadRequest().body("Rating must be between 1 and 5.");
         }
     }
 
+    // Create a new course object
     let new_course_data: Course = Course {
-        id: None,
+        id: None,  // MongoDB will generate the ID
         name: new_course.name.clone(),
         description: new_course.description.clone(),
         rating: new_course.rating.clone(),
@@ -77,8 +86,47 @@ pub async fn create_course(client: web::Data<Client>, new_course: web::Json<Cour
         inscribed: 0,
     };
 
+    // Insert the course into MongoDB
     match collection.insert_one(new_course_data).await {
-        Ok(insert_result) => HttpResponse::Ok().json(insert_result.inserted_id),
+        Ok(insert_result) => {
+            // Retrieve the inserted course's ID (MongoDB generates this)
+            let course_id = insert_result.inserted_id.to_string();  // Convert to String
+            
+            // Prepare the parameters for Neo4j query
+            let params = HashMap::from([
+                ("course_id", course_id.clone()),
+                ("name", new_course.name.clone()),
+                ("description", new_course.description.clone()),
+                ("rating", new_course.rating.unwrap_or_default().to_string()),
+                ("image", new_course.image.clone()),
+                ("image_banner", new_course.image_banner.clone())
+            ]);
+            
+            // Insert the course into Neo4j
+            let graph = neo4j_client.get_ref();
+            match graph
+                .execute(
+                    query(
+                        "CREATE (c:Course {
+                            id: $course_id, 
+                            name: $name, 
+                            description: $description, 
+                            rating: $rating, 
+                            image: $image, 
+                            image_banner: $image_banner
+                        })",
+                    )
+                    .params(params),
+                )
+                .await
+            {
+                Ok(_) => HttpResponse::Ok().json(insert_result.inserted_id),
+                Err(err) => {
+                    eprintln!("Neo4j error: {}", err);
+                    HttpResponse::InternalServerError().body("Failed to save course in Neo4j")
+                }
+            }
+        },
         Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
     }
 }

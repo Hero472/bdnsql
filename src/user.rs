@@ -1,7 +1,7 @@
 use actix_web::{delete, get, post, web, HttpResponse, Responder};
 use chrono::Utc;
 use futures::StreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, uuid, Document};
 use mongodb::bson::oid::ObjectId;
 use mongodb::{bson, Collection, Cursor, Database};
 use neo4rs::{query, Graph};
@@ -16,7 +16,7 @@ use maplit::hashmap;
 
 use crate::class::Classy;
 use crate::comment::{Comment, CommentReceive};
-use crate::course::Course;
+use crate::course::{self, Course};
 use crate::unit::Unit;
 
 #[derive(Serialize, Deserialize)]
@@ -1183,49 +1183,32 @@ pub async fn create_comment_user_neo4j(
     new_comment: web::Json<CommentReceive>,
 ) -> impl Responder {
     let db: Database = mongo_client.database("local");
-    let collection: Collection<Comment> = db.collection("comments");
+    let collection_courses: Collection<Course> = db.collection("courses");
 
-    // MongoDB: Create the new comment
-    let new_comment_data: Comment = Comment {
-        id: None,
-        author: new_comment.author.clone(),
-        date: Utc::now(),
-        title: new_comment.title.clone(),
-        detail: new_comment.detail.clone(),
-        likes: 0,
-        dislikes: 0,
-        reference_id: new_comment.reference_id.clone(),
-        reference_type: new_comment.reference_type.clone(),
-    };
-
-    // Insert the comment into MongoDB
-    match collection.insert_one(&new_comment_data).await {
-        Ok(insert_result) => {
-            // Extract the inserted ID
-            let inserted_id: ObjectId = insert_result.inserted_id.as_object_id().unwrap();
+    // Find course_id in MongoDB
+    match collection_courses.find_one(doc! {"_id": new_comment.reference_id}).await {
+        Ok(course) => {
+            if course.is_none() {
+                return HttpResponse::NotFound().json(json!({"message": "Course not found"}));
+            }
 
             let mut params: HashMap<&str, String> = HashMap::new();
+            params.insert("comment_id", uuid::Uuid::new().to_string());
             params.insert("author", new_comment.author.clone().into());
-            params.insert("comment_id", inserted_id.to_hex().into());
             params.insert("title", new_comment.title.clone().into());
             params.insert("detail", new_comment.detail.clone().into());
             params.insert("date", Utc::now().to_rfc3339().into());
-            
+
             if let Some(reference_id) = new_comment.reference_id {
                 params.insert("reference_id", reference_id.to_string());
             } else {
-                params.insert("reference_id", "null".to_string()); // Or handle null as needed
+                params.insert("reference_id", "null".to_string());
             }
-            
+
             // Convert reference_type to String
             params.insert(
                 "reference_type",
-                new_comment.reference_type.to_string(), // Ensure to_string is implemented for reference_type
-            );
-
-            params.insert(
-                "reference_type",
-                new_comment.reference_type.to_string(), // Ensure to_string is implemented for reference_type
+                new_comment.reference_type.to_string(),
             );
 
             let graph = neo4j_graph.get_ref();
@@ -1242,13 +1225,32 @@ pub async fn create_comment_user_neo4j(
                             reference_type: $reference_type
                         })",
                     )
-                    .params(params),
+                    .params(params.clone()),
                 )
                 .await
             {
-                Ok(_) => HttpResponse::Ok().json(json!({
-                    "message": "Comment successfully created in MongoDB and Neo4j"
-                })),
+                Ok(_) => {
+                    // Create the relationship between Course and Comment
+                    match graph
+                        .execute(
+                            query(
+                                "MATCH (course:Course {id: $course_id}), (comment:Comment {comment_id: $comment_id}) \
+                                 CREATE (course)-[:HAS_COMMENT]->(comment)",
+                            )
+                            .param("course_id",  new_comment.reference_id.map(|id| id.to_hex()).unwrap_or_default())
+                            .param("comment_id", params["comment_id"].clone()),
+                        )
+                        .await
+                    {
+                        Ok(_) => HttpResponse::Ok().json(json!({
+                            "message": "Comment successfully created in MongoDB and Neo4j with relationship to Course"
+                        })),
+                        Err(err) => {
+                            eprintln!("Neo4j relationship error: {}", err);
+                            HttpResponse::InternalServerError().body("Failed to create relationship in Neo4j")
+                        }
+                    }
+                }
                 Err(err) => {
                     eprintln!("Neo4j error: {}", err);
                     HttpResponse::InternalServerError().body("Failed to save the comment in Neo4j")
