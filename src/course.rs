@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::Borrow, collections::HashMap};
 
 use futures::StreamExt;
 use neo4rs::{query, Graph};
@@ -56,6 +56,12 @@ pub struct CourseSummary {
 pub struct CourseWithComments {
     course: Course,
     comments: Vec<CommentSend>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CourseClass {
+    pub course_id: String,
+    pub class_id: String
 }
 
 pub async fn create_course(
@@ -222,6 +228,70 @@ pub async fn get_available_courses(client: web::Data<Client>) -> impl Responder 
         };
     }
     HttpResponse::Ok().json(courses)
+}
+
+pub async fn get_courses_data(client: web::Data<Client>) -> Vec<CourseClass> {
+    let db: Database = client.database("local");
+    let collection_courses: Collection<Course> = db.collection("courses");
+    let collection_units: Collection<Unit> = db.collection("units");
+    let collection_classes: Collection<Classy> = db.collection("classes");
+
+    let mut course_classes = Vec::new();
+
+    match collection_courses.find(doc! {}).await {
+        Ok(mut course_cursor) => {
+            while let Some(course) = course_cursor.next().await {
+                if let Ok(course) = course {
+                    // Find all units related to this course
+                    match collection_units
+                        .find(doc! { "_course_id": course.id })
+                        .await
+                    {
+                        Ok(mut unit_cursor) => {
+                            while let Some(unit) = unit_cursor.next().await {
+                                // Unwrap the unit
+                                if let Ok(unit) = unit {
+                                    // Find all classes related to this unit
+                                    match collection_classes
+                                        .find(doc! { "_unit_id": unit.id })
+                                        .await
+                                    {
+                                        Ok(mut class_cursor) => {
+                                            while let Some(class) = class_cursor.next().await {
+                                                // Unwrap the class
+                                                if let Ok(class) = class {
+                                                    // Create a CourseClass object and push it to the result
+
+                                                    let course_id = course.id.expect("Expect to be defined").to_string();
+                                                    let class_id = class.id.expect("Expect to be defined").to_string();
+
+                                                    course_classes.push(CourseClass {
+                                                        course_id: course_id,
+                                                        class_id: class_id,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        Err(err) => {
+                                            eprintln!("Error fetching classes for unit {}", err);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("Error fetching units for course {}", err);
+                        }
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("Error fetching courses: {}", err);
+        }
+    }
+
+    course_classes
 }
 
 pub async fn get_course(client: web::Data<Client>, course_id: web::Path<String>) -> impl Responder {

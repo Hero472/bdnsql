@@ -1,10 +1,11 @@
 use clap::{command, Parser};
 use class::ClassyReceive;
-use course::{create_complete_course, FullCourse};
+use course::{create_complete_course, get_course, get_courses_data, FullCourse};
 use mongodb::{options::ClientOptions, Client};
 use neo4rs::Graph;
 use routes::{classy_config, comment_config, courses_config, unit_config, user_config};
 use unit::UnitFullCourse;
+use user::{complete_class, create_table, create_user, post_rating, post_rating_neo4j, register_course, CompleteClass, CourseStatusRegister, RatingRequest, User, UserCreate};
 use std::env;
 use dotenv::dotenv;
 
@@ -41,7 +42,11 @@ async fn main() -> mongodb::error::Result<()> {
 
     if cli.populate {
         println!("Populating the database...");
-        populate_database(web::Data::new(client_mongo.clone())).await?;
+        populate_database(
+            web::Data::new(client_mongo.clone()),
+            web::Data::new(client_dynamo.clone()),
+            web::Data::new(client_neo4j.clone()))
+            .await?;
     }
 
     println!("Running server on http://127.0.0.1:8080");
@@ -99,7 +104,11 @@ async fn initialize_neo4j() -> Result<Graph, Box<dyn std::error::Error>> {
     Ok(graph)
 }
 
-pub async fn populate_database(client: web::Data<Client>) -> mongodb::error::Result<()> {
+pub async fn populate_database(
+    client_mongo: web::Data<Client>,
+    client_dynamo: web::Data<DynamoDbClient>,
+    client_neo4j: web::Data<Graph>
+) -> mongodb::error::Result<()> {
     let full_course_rust: FullCourse = FullCourse {
         name: "Mastering Rust Programming".to_string(),
         description: "A comprehensive course covering the fundamentals and advanced concepts of Rust programming.".to_string(),
@@ -261,9 +270,40 @@ pub async fn populate_database(client: web::Data<Client>) -> mongodb::error::Res
             },
         ],
     };
-
-    let _response = create_complete_course(client.clone(), web::Json(full_course_rust)).await;
-    let _response = create_complete_course(client.clone(), web::Json(full_course_javascript)).await;
+    let user1: UserCreate = UserCreate {
+        email: "UnEmail@gmai.com".to_string(),
+        password: "123456789".to_string(),
+    };
+    let user2: UserCreate = UserCreate {
+        email: "UnEmail2@gmai.com".to_string(),
+        password: "123456789".to_string(),
+    };
+    create_complete_course(client_mongo.clone(), web::Json(full_course_rust)).await;
+    create_complete_course(client_mongo.clone(), web::Json(full_course_javascript)).await;
+    create_table(client_dynamo.clone()).await;
+    create_user(client_dynamo.clone(), web::Json(user1.clone())).await;
+    create_user(client_dynamo.clone(), web::Json(user2.clone())).await;
+    let response_courses = get_courses_data(client_mongo.clone()).await;
+    let courseStatus = CourseStatusRegister {
+        user_email: user1.email.clone(),
+        course_id: response_courses[0].course_id.clone(),
+    };
+    let CompleteClass = CompleteClass {
+        user_email: user1.email.clone(),
+        course_id: response_courses[0].course_id.clone(),
+        class_id: response_courses[0].class_id.clone(),
+    };
+    let RatingRequest = RatingRequest {
+        user_email: user1.email.clone(),
+        course_id: response_courses[0].course_id.clone(),
+        rating: 2.4,
+    };
+    register_course(client_dynamo.clone(), client_mongo.clone(), web::Json(courseStatus)).await;
+    complete_class(client_dynamo.clone(), client_mongo.clone(), web::Json(CompleteClass)).await;
+    post_rating(client_dynamo, client_mongo.clone(), web::Json(RatingRequest.clone())).await;
+    post_rating_neo4j(client_neo4j, client_mongo, web::Json(RatingRequest)).await;
     println!("MongoDB populated");
+    println!("DynamoDB populated");
+    println!("Neo4jDB populated");
     Ok(())
 }

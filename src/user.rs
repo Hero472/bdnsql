@@ -1,4 +1,4 @@
-use actix_web::{delete, get, post, web, HttpResponse, Responder};
+use actix_web::{web, HttpResponse, Responder};
 use chrono::Utc;
 use futures::StreamExt;
 use mongodb::bson::{doc, uuid, Document};
@@ -11,6 +11,7 @@ use rusoto_dynamodb::{CreateTableInput, KeySchemaElement, AttributeDefinition, P
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use core::fmt;
+use std::clone;
 use std::collections::HashMap;
 use maplit::hashmap;
 
@@ -30,6 +31,12 @@ pub struct User {
     pub completed_classes: Vec<String>,
     pub completion_percentage: String,
     pub timestamp: String
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UserCreate {
+    pub email: String,
+    pub password: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -100,14 +107,13 @@ pub struct CourseId {
     pub course_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RatingRequest {
-    user_email: String,
-    course_id: String,
-    rating: f32,
+    pub user_email: String,
+    pub course_id: String,
+    pub rating: f32,
 }
 
-#[get("dynamodb/tables")]
 pub async fn list_tables(client_dynamo: web::Data<DynamoDbClient>) -> impl Responder {
     let input: ListTablesInput = ListTablesInput {limit:Some(10), exclusive_start_table_name: None };
     match client_dynamo.list_tables(input).await {
@@ -121,7 +127,6 @@ pub async fn list_tables(client_dynamo: web::Data<DynamoDbClient>) -> impl Respo
     }
 }
 
-#[post("dynamodb/create_table")]
 pub async fn create_table(client_dynamo: web::Data<DynamoDbClient>) -> impl Responder {
     let input: CreateTableInput = CreateTableInput {
         table_name: "bdnsql".to_string(),
@@ -165,7 +170,6 @@ pub async fn create_table(client_dynamo: web::Data<DynamoDbClient>) -> impl Resp
     }
 }
 
-#[get("/dynamodb/get_users")]
 pub async fn get_users(client_dynamo: web::Data<DynamoDbClient>) -> impl Responder {
     let scan_input: ScanInput = ScanInput {
         table_name: "bdnsql".to_string(),
@@ -241,8 +245,7 @@ pub async fn get_users(client_dynamo: web::Data<DynamoDbClient>) -> impl Respond
     }
 }
 
-#[post("dynamodb/register")]
-pub async fn create_user(client_dynamo: web::Data<DynamoDbClient>, user: web::Json<User>) -> impl Responder {
+pub async fn create_user(client_dynamo: web::Data<DynamoDbClient>, user: web::Json<UserCreate>) -> impl Responder {
     let email: String = user.email.clone();
     let password: String = user.password.clone();
 
@@ -299,7 +302,6 @@ pub async fn create_user(client_dynamo: web::Data<DynamoDbClient>, user: web::Js
     }
 }
 
-#[get("dynamodb/login")]
 pub async fn login_user(client_dynamo: web::Data<DynamoDbClient>, user: web::Json<User>) -> impl Responder {
     let email: String = user.email.clone();
     let password: String = user.password.clone();
@@ -346,8 +348,6 @@ pub async fn login_user(client_dynamo: web::Data<DynamoDbClient>, user: web::Jso
     }
 }
 
-// not used lol
-#[post("dynamodb/update_course_status")]
 pub async fn update_course_status(
     client_dynamo: web::Data<DynamoDbClient>,
     client_mongo: web::Data<mongodb::Client>,
@@ -484,7 +484,6 @@ pub async fn update_course_status(
 
 }
 
-#[post("dynamodb/complete_class")]
 pub async fn complete_class(
     client_dynamo: web::Data<DynamoDbClient>,
     client_mongo: web::Data<mongodb::Client>,
@@ -698,7 +697,6 @@ pub async fn complete_class(
     }
 }
 
-#[post("dynamodb/register_course")]
 pub async fn register_course(
     client_dynamo: web::Data<DynamoDbClient>,
     client_mongo: web::Data<mongodb::Client>,
@@ -815,7 +813,6 @@ pub async fn register_course(
     }
 }
 
-#[get("dynamodb/get_user_courses")]
 pub async fn get_user_courses(
     client_dynamo: web::Data<DynamoDbClient>,
     input_data: web::Json<UserCoursesRequest>,
@@ -858,7 +855,6 @@ pub async fn get_user_courses(
     }
 }
 
-#[post("neo4j/rating")]
 pub async fn post_rating_neo4j(
     neo4j_graph: web::Data<Graph>,
     client_mongo: web::Data<mongodb::Client>,
@@ -932,7 +928,6 @@ pub async fn post_rating_neo4j(
     }
 }
 
-#[post("dynamodb/rating")]
 pub async fn post_rating(
     client_dynamo: web::Data<DynamoDbClient>,
     client_mongo: web::Data<mongodb::Client>,
@@ -1058,8 +1053,6 @@ pub async fn post_rating(
     }
 }
 
-
-#[post("dynamodb/create_comment")]
 pub async fn create_comment_user(
     mongo_client: web::Data<mongodb::Client>,
     dynamo_client: web::Data<DynamoDbClient>,
@@ -1176,7 +1169,6 @@ pub async fn create_comment_user(
     }
 }
 
-#[post("neo4j/create_comment")]
 pub async fn create_comment_user_neo4j(
     mongo_client: web::Data<mongodb::Client>,
     neo4j_graph: web::Data<Graph>,
@@ -1264,7 +1256,6 @@ pub async fn create_comment_user_neo4j(
     }
 }
 
-#[delete("dynamodb/delete_register")]
 pub async fn delete_register(
     client_dynamo: web::Data<DynamoDbClient>,
     delete_request: web::Json<DeleteRegisterRequest>,
